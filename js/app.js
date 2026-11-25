@@ -150,7 +150,7 @@ function renderHome() {
     <div class="note"><b>💡 자기주도 학습 팁</b><ul>
       <li>코드는 <b>고쳐서 다시 실행</b>해도 괜찮아요. 망가지면 <b>↺ 처음 코드로</b> 버튼!</li>
       <li>각 단계의 <b>준비 셀</b>을 먼저 실행하면 어느 단계부터든 시작할 수 있어요.</li>
-      <li>미션이 막히면 <b>힌트 → 정답 보기</b> 순서로 도움을 받으세요. 정답을 먼저 보지 않기!</li>
+      <li>미션이 막히면 <b>힌트</b>를 보세요. <b>정답은 미션을 맞힌 뒤에</b> 내 코드와 비교용으로 열려요!</li>
       <li><b>Ctrl+Enter</b> 로 셀을 실행할 수 있어요. 진행 상황은 이 브라우저에 자동 저장됩니다.</li></ul></div>
     <h2>학습 단계</h2><div class="lgrid">${cards}</div>`;
 }
@@ -164,8 +164,8 @@ function codeCell(b, mission) {
     <div class="editor"><textarea spellcheck="false" rows="${rows}" data-orig="${esc(start)}">${esc(start)}</textarea></div>
     <div class="cbar"><button class="btn run" data-act="run">▶ 실행 <kbd>Ctrl+Enter</kbd></button>
       <button class="btn ghost" data-act="reset">↺ 처음 코드로</button>
-      ${mission ? '<button class="btn ghost" data-act="hint">💡 힌트</button><button class="btn ghost" data-act="sol">🔑 정답 보기</button>' : ''}</div>
-    ${mission ? `<div class="hintbox" hidden>💡 ${b.hint}</div><div class="solbox" hidden><b>정답 예시</b><pre>${esc(b.solution)}</pre></div><div class="result" hidden></div>` : ''}
+      ${mission ? '<button class="btn ghost" data-act="hint">💡 힌트</button><span class="solslot"></span>' : ''}</div>
+    ${mission ? `<div class="hintbox" hidden>💡 ${b.hint}</div><div class="solbox" hidden></div><div class="result" hidden></div>` : ''}
     <div class="out" hidden></div></div>`;
 }
 
@@ -268,6 +268,13 @@ function exportReport() {
   a.download = '기계학습_학습기록.txt'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+/* 정답은 미션을 맞힌 뒤에만 화면에 만들어진다 */
+function unlockSolution(cell, b) {
+  if (!cell || $('[data-act=sol]', cell)) return;
+  $('.solslot', cell).innerHTML = '<button class="btn ghost" data-act="sol">🔑 모범 정답 비교하기</button>';
+  $('.solbox', cell).innerHTML = `<b>모범 정답 예시</b> <small>(내 코드와 비교해 보세요)</small><pre>${esc(b.solution)}</pre>`;
+}
+
 /* ───── 셀 실행 ───── */
 async function execCell(cell) {
   const ta = $('textarea', cell), out = $('.out', cell), btn = $('[data-act=run]', cell);
@@ -298,6 +305,7 @@ async function gradeMission(cell, id) {
   if (r.ok) {
     res.className = 'result good'; res.innerHTML = '🎉 <b>성공!</b> 미션을 해결했어요.';
     S.done[id] = true; save();
+    unlockSolution(cell, b);
     const bd = $('[data-badge]', cell); bd.textContent = '✔ 완료'; bd.classList.add('ok'); renderNav(l.id);
   } else { res.className = 'result bad'; res.innerHTML = '🤔 <b>조금만 더!</b> ' + esc(r.msg); }
 }
@@ -318,7 +326,7 @@ document.addEventListener('click', e => {
   if (act === 'run') execCell(cell);
   else if (act === 'reset') { const ta = $('textarea', cell); ta.value = ta.dataset.orig; autosize(ta); }
   else if (act === 'hint') $('.hintbox', cell).hidden = false;
-  else if (act === 'sol') { const sb = $('.solbox', cell); if (sb.hidden && !confirm('정답을 보기 전에 힌트와 앞 셀을 다시 확인했나요?\n정답을 확인할까요?')) return; sb.hidden = !sb.hidden; }
+  else if (act === 'sol') { const sb = $('.solbox', cell); sb.hidden = !sb.hidden; }
 });
 document.addEventListener('keydown', e => {
   const ta = e.target.closest && e.target.closest('.editor textarea'); if (!ta) return;
@@ -342,6 +350,7 @@ function route() {
   else { main.innerHTML = renderHome(); active = 'home'; }
   renderNav(active); bindWidgets(main);
   main.querySelectorAll('.editor textarea').forEach(autosize);
+  if (l) l.blocks.filter(b => b.t === 'mission' && S.done[b.id]).forEach(b => unlockSolution(main.querySelector(`.cell[data-id="${b.id}"]`), b));
   window.scrollTo(0, 0); document.body.classList.remove('navopen');
   if (id === 'report') {
     $('#dl').onclick = exportReport;
