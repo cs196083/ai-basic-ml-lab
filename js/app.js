@@ -25,6 +25,20 @@ import pandas as pd
 pd.set_option('display.max_rows', 40)
 ns = {'__name__': '__main__'}
 
+# 교과서 코드 호환: koreanize_matplotlib(한글 폰트 모듈) 대체 모듈
+import types
+_k = types.ModuleType('koreanize_matplotlib'); sys.modules['koreanize_matplotlib'] = _k
+
+# plt.show()를 부르면 그때까지 그린 그래프를 따로 저장해 둔다(한 셀에서 그래프 여러 개)
+_pending = []
+def _grab():
+    for n in plt.get_fignums():
+        buf = io.BytesIO()
+        plt.figure(n).savefig(buf, format='png', bbox_inches='tight', dpi=110)
+        _pending.append(base64.b64encode(buf.getvalue()).decode())
+    plt.close('all')
+plt.show = lambda *a, **k: _grab()
+
 HINTS = {
  'NameError': '정의되지 않은 이름이에요. 철자를 확인하고, 위쪽 셀(특히 "준비" 셀)을 먼저 실행했는지 확인하세요.',
  'SyntaxError': '문법 오류예요. 괄호·따옴표·콜론(:)과 들여쓰기를 확인하세요.',
@@ -39,12 +53,8 @@ HINTS = {
 }
 
 def _figs():
-    out = []
-    for n in plt.get_fignums():
-        buf = io.BytesIO()
-        plt.figure(n).savefig(buf, format='png', bbox_inches='tight', dpi=110)
-        out.append(base64.b64encode(buf.getvalue()).decode())
-    plt.close('all')
+    _grab()
+    out = list(_pending); _pending.clear()
     return out
 
 def _run(code):
@@ -69,7 +79,10 @@ def _run(code):
             if fs.filename == '<셀>': line = fs.lineno
         name = type(e).__name__
         msg = str(e).split(chr(10))[0]
-        err = {'type': name, 'msg': msg, 'line': line, 'hint': HINTS.get(name, '')}
+        hint = HINTS.get(name, '')
+        if 'could not convert string to float' in msg:
+            hint = '문자(범주형) 데이터는 선형 회귀의 입력으로 쓸 수 없어요. 숫자로 바꾸는 원-핫 인코딩(get_dummies)이 필요해요.'
+        err = {'type': name, 'msg': msg, 'line': line, 'hint': hint}
     return json.dumps({'stdout': out.getvalue(), 'items': items, 'figs': _figs(), 'err': err})
 
 def _check(code):
@@ -82,7 +95,7 @@ def _check(code):
         return json.dumps({'ok': False, 'msg': '확인하는 중 오류가 났어요(' + type(e).__name__ + '). 위 코드가 끝까지 실행됐는지, 앞 셀을 먼저 실행했는지 확인하세요.'})
 
 def _reset():
-    ns.clear(); ns['__name__'] = '__main__'; plt.close('all')
+    ns.clear(); ns['__name__'] = '__main__'; plt.close('all'); _pending.clear()
 `;
 
 let pyodide = null;
@@ -93,16 +106,26 @@ const ready = (async () => {
     await new Promise((res, rej) => { const s = document.createElement('script'); s.src = PYODIDE_URL + 'pyodide.js'; s.onload = res; s.onerror = () => rej(new Error('pyodide.js 로드 실패')); document.head.appendChild(s); });
     pyodide = await loadPyodide({ indexURL: PYODIDE_URL });
     setStatus('📦 pandas · scikit-learn · matplotlib 설치 중…', 'loading');
-    await pyodide.loadPackage(['pandas', 'scikit-learn', 'matplotlib']);
+    await pyodide.loadPackage(['pandas', 'scikit-learn', 'matplotlib', 'micropip']);
+    setStatus('📦 seaborn 설치 중…', 'loading');
+    let seabornOK = true;
+    try { await pyodide.runPythonAsync("import micropip; await micropip.install('seaborn')"); } catch (e) { seabornOK = false; console.error('seaborn', e); }
     setStatus('📂 실습 데이터 불러오는 중…', 'loading');
-    pyodide.FS.mkdir('data');
-    for (const f of ['Iris1.csv', 'Iris2.csv']) {
-      const r = await fetch('data/' + f); pyodide.FS.writeFile('data/' + f, new Uint8Array(await r.arrayBuffer()));
+    for (const f of ['Iris1.csv', 'Iris2.csv', 'tips.csv']) {   // 교과서처럼 현재 폴더에 두어 'Iris1.csv' 로 바로 읽는다
+      const r = await fetch('data/' + f); pyodide.FS.writeFile(f, new Uint8Array(await r.arrayBuffer()));
     }
     const fr = await fetch('assets/NanumGothic.ttf');
     pyodide.FS.writeFile('/home/pyodide/NanumGothic.ttf', new Uint8Array(await fr.arrayBuffer()));
     await pyodide.runPythonAsync(PY_HARNESS);
-    setStatus('✅ 파이썬 준비 완료', 'ok');
+    if (seabornOK) await pyodide.runPythonAsync(`
+import seaborn as sns
+_orig_load = sns.load_dataset
+def _load_dataset(name, *a, **k):          # 인터넷 없이 내장 파일에서 tips 데이터 읽기
+    if name == 'tips': return pd.read_csv('tips.csv')
+    return _orig_load(name, *a, **k)
+sns.load_dataset = _load_dataset
+`);
+    setStatus(seabornOK ? '✅ 파이썬 준비 완료' : '⚠️ 준비 완료(seaborn 설치 실패: 그래프 일부가 동작하지 않을 수 있어요)', seabornOK ? 'ok' : 'err');
     return true;
   } catch (e) {
     console.error(e);
@@ -145,11 +168,11 @@ function renderNav(active) {
 function renderHome() {
   const cards = LESSONS.map(l => { const p = progressOf(l); return `<a class="lcard" href="#${l.id}"><span class="lico">${l.icon}</span><div><small>${l.no}단계 · ${l.page}</small><h3>${l.title}</h3><p>${l.goals[0]}</p><div class="mini"><i style="width:${p.total ? p.done / p.total * 100 : 0}%"></i></div></div></a>`; }).join('');
   return `<section class="hero"><h1>🌸 기계학습 실습실</h1><p class="sub">인공지능 기초 · Ⅱ. 인공지능과 학습 · 1. 기계학습 (교과서 59~81쪽)</p>
-    <p>교과서의 <b>이론</b>을 읽고, 바로 아래에서 <b>실제 파이썬 코드를 실행</b>하며 확인해요. 설치할 것은 없고, 브라우저에서 모두 실행됩니다.</p></section>
-    <div class="how"><div><b>1</b><span>이론 읽기</span></div><div><b>2</b><span>퀴즈로 점검</span></div><div><b>3</b><span>코드 ▶ 실행·수정</span></div><div><b>4</b><span>미션 도전 (자동 채점)</span></div><div><b>5</b><span>생각 정리 기록</span></div></div>
+    <p>교과서의 <b>이론</b>을 읽고, 교과서에 나온 <b>실습 코드의 빈칸(<code>____</code>)을 채워</b> 직접 실행해 보며 코드를 익혀요. 설치할 것은 없고, 브라우저에서 모두 실행됩니다.</p></section>
+    <div class="how"><div><b>1</b><span>이론 읽기</span></div><div><b>2</b><span>퀴즈로 점검</span></div><div><b>3</b><span>코드 ▶ 실행·수정</span></div><div><b>4</b><span>빈칸 채우기 미션 (자동 채점)</span></div><div><b>5</b><span>생각 정리 기록</span></div></div>
     <div class="note"><b>💡 자기주도 학습 팁</b><ul>
       <li>코드는 <b>고쳐서 다시 실행</b>해도 괜찮아요. 망가지면 <b>↺ 처음 코드로</b> 버튼!</li>
-      <li>각 단계의 <b>준비 셀</b>을 먼저 실행하면 어느 단계부터든 시작할 수 있어요.</li>
+      <li>각 단계의 <b>준비 셀</b>을 먼저 실행하면 어느 단계부터든 시작할 수 있어요. 미션은 <b>위에서부터 차례로</b> 풀어요(앞 미션의 변수를 이어서 써요).</li><li>미션의 <code>____</code>를 채운 뒤 ▶ 실행! 코드 옆 설명(#)을 읽으면 힌트가 돼요.</li>
       <li>미션이 막히면 <b>힌트</b>를 보세요. <b>정답은 미션을 맞힌 뒤에</b> 내 코드와 비교용으로 열려요!</li>
       <li><b>Ctrl+Enter</b> 로 셀을 실행할 수 있어요. 진행 상황은 이 브라우저에 자동 저장됩니다.</li></ul></div>
     <h2>학습 단계</h2><div class="lgrid">${cards}</div>`;
@@ -158,7 +181,7 @@ function renderHome() {
 function codeCell(b, mission) {
   const start = mission ? b.starter : b.code;
   const rows = Math.min(18, Math.max(3, start.split('\n').length));
-  return `<div class="cell ${mission ? 'mission' : ''}" data-id="${b.id}">
+  return `<div class="cell ${mission ? 'mission' : ''}" data-id="${b.id}" ${b.expectError ? 'data-experr="1"' : ''}>
     <div class="chead"><h4>${b.title}</h4>${mission ? `<span class="badge ${S.done[b.id] ? 'ok' : ''}" data-badge>${S.done[b.id] ? '✔ 완료' : '미완료'}</span>` : ''}</div>
     <p class="cdesc">${b.desc}</p>
     <div class="editor"><textarea spellcheck="false" rows="${rows}" data-orig="${esc(start)}">${esc(start)}</textarea></div>
@@ -291,6 +314,7 @@ async function execCell(cell) {
     r.figs.forEach(f => { h += `<img class="fig" alt="그래프" src="data:image/png;base64,${f}">`; });
     if (r.err) {
       h += `<div class="err"><b>${esc(r.err.type)}</b>${r.err.line ? ` (${r.err.line}번째 줄)` : ''}: ${esc(r.err.msg)}${r.err.hint ? `<br><span>💬 ${r.err.hint}</span>` : ''}</div>`;
+      if (cell.dataset.experr) { ok = true; h += '<div class="note-ok">👀 이 셀은 오류가 나는 것이 정상이에요. 오류 메시지를 읽어 보고 다음 단계로 가세요.</div>'; }
     } else { ok = true; if (!h) h = '<div class="muted">✔ 실행 완료 (출력할 내용이 없어요)</div>'; }
     out.innerHTML = h;
     if (ok && cell.classList.contains('mission')) await gradeMission(cell, id);
